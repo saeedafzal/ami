@@ -147,6 +147,7 @@ fn main() -> io::Result<()> {
                             draw(&mut stdout, &mut state)?;
                         }
                         KeyCode::Enter => match state.command.as_str() {
+                            ":q" => break,
                             _ => {
                                 state.command = String::from("Unknown command.");
                                 state.mode = Mode::Normal;
