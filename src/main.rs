@@ -26,6 +26,7 @@ pub struct State {
     pub mode: Mode,
     pub command: String,
     pub cursor_position: Cursor,
+    pub buffer: String,
 }
 
 fn draw(stdout: &mut io::Stdout, state: &mut State) -> io::Result<()> {
@@ -44,6 +45,15 @@ fn draw(stdout: &mut io::Stdout, state: &mut State) -> io::Result<()> {
     // Render command text
     stdout.queue(MoveTo(0, state.height - 1))?;
     stdout.write(state.command.as_bytes())?;
+
+    // Render buffer text
+    stdout.queue(MoveTo(0, 0))?;
+    let buffer: Vec<&str> = state.buffer.split("\n").collect();
+    for (i, line) in buffer.iter().enumerate() {
+        stdout.write(line.as_bytes())?;
+        let index = i + 1;
+        stdout.queue(MoveTo(0, index as u16))?;
+    }
 
     // Mode specific and display cursor
     match state.mode {
@@ -95,6 +105,7 @@ fn main() -> io::Result<()> {
             command: (1, height - 1),
             insert: position()?,
         },
+        buffer: String::new(),
     };
 
     // Initial draw
@@ -165,7 +176,20 @@ fn main() -> io::Result<()> {
                     },
                     Mode::Insert => match code {
                         KeyCode::Esc => {
+                            state.cursor_position.normal.0 = state.cursor_position.normal.0.saturating_sub(1);
                             to_normal_mode(&mut stdout, &mut state)?;
+                        }
+                        KeyCode::Enter => {
+                            state.buffer.push_str("\n");
+                            state.cursor_position.insert = (0, state.cursor_position.insert.1 + 1);
+                            state.cursor_position.normal = (0, state.cursor_position.normal.1 + 1);
+                            draw(&mut stdout, &mut state)?;
+                        }
+                        KeyCode::Char(x) => {
+                            state.buffer.push(x);
+                            state.cursor_position.insert.0 += 1;
+                            state.cursor_position.normal.0 += 1;
+                            draw(&mut stdout, &mut state)?;
                         }
                         _ => {}
                     }
