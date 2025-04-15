@@ -1,29 +1,29 @@
 use crossterm::{
     cursor::{position, MoveTo, SetCursorStyle},
-    event::{poll, read, Event, KeyCode, KeyModifiers},
+    event::{read, Event, KeyCode, KeyModifiers},
     execute, queue,
     style::{Color, ResetColor, SetBackgroundColor},
     terminal::{self, Clear, ClearType},
     QueueableCommand,
 };
 use std::io::{self, Write};
-use std::time::Duration;
 
 pub enum Mode {
     Normal,
     Command,
+    Insert,
 }
 
 pub struct Cursor {
     pub normal: (u16, u16),
     pub command: (u16, u16),
+    pub insert: (u16, u16),
 }
 
 pub struct State {
     pub width: u16,
     pub height: u16,
     pub mode: Mode,
-    pub running: bool,
     pub command: String,
     pub cursor_position: Cursor,
 }
@@ -42,22 +42,22 @@ fn draw(stdout: &mut io::Stdout, state: &mut State) -> io::Result<()> {
     stdout.queue(ResetColor)?;
 
     // Render command text
-    state.cursor_position.command = (0, state.height - 1);
+    stdout.queue(MoveTo(0, state.height - 1))?;
     stdout.write(state.command.as_bytes())?;
-    state.cursor_position.command.0 = state.command.len() as u16;
 
     // Mode specific and display cursor
     match state.mode {
         Mode::Normal => {
-            stdout.queue(SetCursorStyle::SteadyBlock)?;
-
             let (x, y) = state.cursor_position.normal;
-            stdout.queue(MoveTo(x, y))?;
+            queue!(stdout, SetCursorStyle::SteadyBlock, MoveTo(x, y))?;
         }
         Mode::Command => {
-            state.cursor_position.command.0 = state.command.len() as u16;
             let (x, y) = state.cursor_position.command;
-            stdout.queue(MoveTo(x, y))?;
+            queue!(stdout, SetCursorStyle::SteadyBlock, MoveTo(x, y))?;
+        }
+        Mode::Insert => {
+            let (x, y) = state.cursor_position.insert;
+            queue!(stdout, SetCursorStyle::SteadyBar, MoveTo(x, y))?;
         }
     };
 
@@ -67,9 +67,10 @@ fn draw(stdout: &mut io::Stdout, state: &mut State) -> io::Result<()> {
     Ok(())
 }
 
-fn command_to_normal(stdout: &mut io::Stdout, state: &mut State) -> io::Result<()> {
+fn to_normal_mode(stdout: &mut io::Stdout, state: &mut State) -> io::Result<()> {
     state.command.clear();
     state.mode = Mode::Normal;
+    state.cursor_position.command.0 = 1;
     draw(stdout, state)
 }
 
@@ -88,11 +89,11 @@ fn main() -> io::Result<()> {
         width,
         height,
         mode: Mode::Normal,
-        running: true,
         command: String::new(),
         cursor_position: Cursor {
             normal: position()?,
-            command: (0, height - 1),
+            command: (1, height - 1),
+            insert: position()?,
         },
     };
 
@@ -100,7 +101,7 @@ fn main() -> io::Result<()> {
     draw(&mut stdout, &mut state)?;
 
     // Event loop
-    while state.running {
+    loop {
         let event = read()?;
 
         match event {
@@ -112,7 +113,6 @@ fn main() -> io::Result<()> {
             Event::Key(event) => {
                 let code = event.code;
                 if code == KeyCode::Char('z') && event.modifiers.contains(KeyModifiers::CONTROL) {
-                    state.running = false;
                     break;
                 }
 
@@ -123,26 +123,27 @@ fn main() -> io::Result<()> {
                             state.command = String::from(":");
                             draw(&mut stdout, &mut state)?;
                         }
+                        KeyCode::Char('i') => {
+                            state.mode = Mode::Insert;
+                            draw(&mut stdout, &mut state)?;
+                        }
                         _ => {}
                     },
                     // TODO: Command seems to draw in every branch, draw at the end instead
                     Mode::Command => match code {
-                        // Escapes are weird in terminals... doesn't seem to register so checking
-                        // if it's a lone escape key event by polling for any other keys
                         KeyCode::Esc => {
-                            if poll(Duration::from_millis(50))? {
-                                read()?;
-                            } else {
-                                command_to_normal(&mut stdout, &mut state)?;
-                            }
+                            to_normal_mode(&mut stdout, &mut state)?;
                         }
                         KeyCode::Char('c') if event.modifiers.contains(KeyModifiers::CONTROL) => {
-                            command_to_normal(&mut stdout, &mut state)?;
+                            to_normal_mode(&mut stdout, &mut state)?;
                         }
                         KeyCode::Backspace => {
                             state.command.pop();
+                            state.cursor_position.command.0 -= 1;
+
                             if state.command.is_empty() {
                                 state.mode = Mode::Normal;
+                                state.cursor_position.command.0 = 1;
                             }
                             draw(&mut stdout, &mut state)?;
                         }
@@ -151,15 +152,23 @@ fn main() -> io::Result<()> {
                             _ => {
                                 state.command = String::from("Unknown command.");
                                 state.mode = Mode::Normal;
+                                state.cursor_position.command.0 = 1;
                                 draw(&mut stdout, &mut state)?;
                             }
                         }
                         KeyCode::Char(x) => {
                             state.command.push(x);
+                            state.cursor_position.command.0 += 1;
                             draw(&mut stdout, &mut state)?;
                         }
                         _ => {}
                     },
+                    Mode::Insert => match code {
+                        KeyCode::Esc => {
+                            to_normal_mode(&mut stdout, &mut state)?;
+                        }
+                        _ => {}
+                    }
                 }
             }
             _ => {}
