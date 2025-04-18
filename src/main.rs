@@ -136,6 +136,11 @@ fn main() -> io::Result<()> {
                         }
                         KeyCode::Char('i') => {
                             state.mode = Mode::Insert;
+                            state.cursor_position.insert.0 = state.cursor_position.insert.0.saturating_sub(1);
+                            draw(&mut stdout, &mut state)?;
+                        }
+                        KeyCode::Char('a') => {
+                            state.mode = Mode::Insert;
                             draw(&mut stdout, &mut state)?;
                         }
                         _ => {}
@@ -150,7 +155,7 @@ fn main() -> io::Result<()> {
                         }
                         KeyCode::Backspace => {
                             state.command.pop();
-                            state.cursor_position.command.0 -= 1;
+                            state.cursor_position.command.0 = state.cursor_position.command.0.saturating_sub(1);
 
                             if state.command.is_empty() {
                                 state.mode = Mode::Normal;
