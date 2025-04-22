@@ -1,11 +1,12 @@
 use crossterm::{
-    cursor::{position, MoveTo, SetCursorStyle},
-    event::{read, Event, KeyCode, KeyModifiers},
-    execute, queue,
-    style::{Color, ResetColor, SetBackgroundColor},
+    cursor::{MoveTo, SetCursorStyle},
+    event::{read, Event, KeyCode, KeyEvent, KeyModifiers},
+    queue,
+    style::{Color, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal::{self, Clear, ClearType},
-    QueueableCommand,
+    ExecutableCommand, QueueableCommand,
 };
+use std::collections::HashMap;
 use std::io::{self, Write};
 
 pub enum Mode {
@@ -21,12 +22,208 @@ pub struct Cursor {
 }
 
 pub struct State {
+    pub running: bool,
     pub width: u16,
     pub height: u16,
     pub mode: Mode,
+    pub cursor_pos: Cursor,
+    pub status_bar: Vec<String>,
     pub command: String,
-    pub cursor_position: Cursor,
-    pub buffer: String,
+    pub buffer: Vec<String>,
+}
+
+// Callback
+type Action = Box<dyn Fn(&mut io::Stdout, &mut State) -> io::Result<()>>;
+
+// Helper function to create action
+fn into_action<F>(f: F) -> Action
+where
+    F: Fn(&mut io::Stdout, &mut State) -> io::Result<()> + 'static,
+{
+    Box::new(f)
+}
+
+// Global map of actions that runs on all modes
+fn global_map() -> HashMap<KeyEvent, Action> {
+    let mut m = HashMap::new();
+
+    // Kill editor
+    m.insert(
+        KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
+        into_action(|_, state| {
+            state.running = false;
+            Ok(())
+        }),
+    );
+
+    m
+}
+
+fn normal_map() -> HashMap<KeyEvent, Action> {
+    let mut m = HashMap::new();
+
+    // Go to command mode
+    m.insert(
+        KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+        into_action(|stdout, state| {
+            state.mode = Mode::Command;
+            state.command = String::from(":");
+            draw(stdout, state)
+        }),
+    );
+
+    m.insert(
+        KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+        into_action(|stdout, state| {
+            state.mode = Mode::Insert;
+            state.cursor_pos.insert.0 = state.cursor_pos.insert.0.saturating_sub(1);
+            draw(stdout, state)
+        }),
+    );
+
+    m.insert(
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        into_action(|stdout, state| {
+            state.mode = Mode::Insert;
+            if state.cursor_pos.insert.0 == 0 {
+                state.cursor_pos.insert.0 += 1;
+            }
+            draw(stdout, state)
+        }),
+    );
+
+    m
+}
+
+fn command_to_normal(stdout: &mut io::Stdout, state: &mut State) -> io::Result<()> {
+    state.mode = Mode::Normal;
+    state.command.clear();
+    state.cursor_pos.command.0 = 1;
+    draw(stdout, state)
+}
+
+fn command_map() -> HashMap<KeyEvent, Action> {
+    let mut m = HashMap::new();
+
+    m.insert(
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        into_action(|stdout, state| {
+            state.command.pop();
+            state.cursor_pos.command.0 = state.cursor_pos.command.0.saturating_sub(1);
+
+            if state.command.is_empty() {
+                state.mode = Mode::Normal;
+                state.cursor_pos.command.0 = 1;
+            }
+
+            draw(stdout, state)
+        }),
+    );
+
+    m.insert(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        into_action(|stdout, state| command_to_normal(stdout, state)),
+    );
+
+    m.insert(
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        into_action(|stdout, state| command_to_normal(stdout, state)),
+    );
+
+    m.insert(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        into_action(|stdout, state| {
+            match state.command.as_str() {
+                ":q" => state.running = false,
+                _ => {
+                    state.command = String::from("Unknown command.");
+                    state.mode = Mode::Normal;
+                    state.cursor_pos.command.0 = 1;
+                }
+            }
+            draw(stdout, state)
+        }),
+    );
+
+    m
+}
+
+fn insert_map() -> HashMap<KeyEvent, Action> {
+    let mut m = HashMap::new();
+
+    m.insert(
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        into_action(|stdout, state| {
+            state.cursor_pos.normal.0 = state.cursor_pos.insert.0.saturating_sub(1);
+            command_to_normal(stdout, state)
+        }),
+    );
+
+    m.insert(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        into_action(|stdout, state| {
+            let (x, y) = state.cursor_pos.insert;
+            let line = &mut state.buffer[y as usize];
+            let tail = line.split_off(x as usize);
+            state.buffer.insert(y as usize + 1, tail);
+
+            state.cursor_pos.normal = (0, y + 1);
+            state.cursor_pos.insert = (0, y + 1);
+
+            draw(stdout, state)
+        }),
+    );
+
+    m.insert(
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        into_action(|stdout, state| {
+            let (x, y) = state.cursor_pos.insert;
+            let ys = y as usize;
+
+            if x > 0 {
+                let index = (x - 1) as usize;
+                if index < state.buffer[ys].len() {
+                    state.buffer[ys].remove(index);
+                }
+                state.cursor_pos.normal.0 -= 1;
+                state.cursor_pos.insert.0 -= 1;
+            } else if y > 0 {
+                let prev_index = ys - 1;
+                let line = state.buffer.remove(ys);
+                let prev_length = state.buffer[prev_index].len() as u16;
+                state.buffer[prev_index].push_str(&line);
+                state.cursor_pos.insert = (prev_length, prev_index as u16);
+                state.cursor_pos.normal = (prev_length, prev_index as u16);
+            }
+            draw(stdout, state)
+        }),
+    );
+
+    m
+}
+
+fn draw_status_bar(stdout: &mut io::Stdout, state: &mut State) -> io::Result<()> {
+    queue!(
+        stdout,
+        MoveTo(0, state.height - 2),
+        SetBackgroundColor(Color::Rgb {
+            r: 29,
+            g: 41,
+            b: 61
+        }),
+        SetForegroundColor(Color::White)
+    )?;
+
+    // Background
+    stdout.write(" ".repeat(state.width as usize).as_bytes())?;
+
+    // Text
+    stdout.queue(MoveTo(0, state.height - 2))?;
+    let a = String::from(" ") + &state.status_bar[0];
+    stdout.write(a.as_bytes())?;
+
+    stdout.queue(ResetColor)?;
+    Ok(())
 }
 
 fn draw(stdout: &mut io::Stdout, state: &mut State) -> io::Result<()> {
@@ -34,42 +231,35 @@ fn draw(stdout: &mut io::Stdout, state: &mut State) -> io::Result<()> {
     stdout.queue(Clear(ClearType::All))?;
 
     // Render status bar
-    queue!(
-        stdout,
-        MoveTo(0, state.height - 2),
-        SetBackgroundColor(Color::White)
-    )?;
-    stdout.write_all(" ".repeat(state.width as usize).as_bytes())?;
-    stdout.queue(ResetColor)?;
+    draw_status_bar(stdout, state)?;
 
-    // Render command text
+    // Render command
     stdout.queue(MoveTo(0, state.height - 1))?;
     stdout.write(state.command.as_bytes())?;
 
-    // Render buffer text
+    // Render buffer
     stdout.queue(MoveTo(0, 0))?;
-    let buffer: Vec<&str> = state.buffer.split("\n").collect();
-    for (i, line) in buffer.iter().enumerate() {
+    for (i, line) in state.buffer.iter().enumerate() {
         stdout.write(line.as_bytes())?;
         let index = i + 1;
         stdout.queue(MoveTo(0, index as u16))?;
     }
 
-    // Mode specific and display cursor
+    // Mode specific
     match state.mode {
         Mode::Normal => {
-            let (x, y) = state.cursor_position.normal;
+            let (x, y) = state.cursor_pos.normal;
             queue!(stdout, SetCursorStyle::SteadyBlock, MoveTo(x, y))?;
         }
         Mode::Command => {
-            let (x, y) = state.cursor_position.command;
-            queue!(stdout, SetCursorStyle::SteadyBlock, MoveTo(x, y))?;
+            let (x, y) = state.cursor_pos.command;
+            stdout.queue(MoveTo(x, y))?;
         }
         Mode::Insert => {
-            let (x, y) = state.cursor_position.insert;
+            let (x, y) = state.cursor_pos.insert;
             queue!(stdout, SetCursorStyle::SteadyBar, MoveTo(x, y))?;
         }
-    };
+    }
 
     // Flush the output
     stdout.flush()?;
@@ -77,42 +267,42 @@ fn draw(stdout: &mut io::Stdout, state: &mut State) -> io::Result<()> {
     Ok(())
 }
 
-fn to_normal_mode(stdout: &mut io::Stdout, state: &mut State) -> io::Result<()> {
-    state.command.clear();
-    state.mode = Mode::Normal;
-    state.cursor_position.command.0 = 1;
-    draw(stdout, state)
-}
-
 fn main() -> io::Result<()> {
+    // Build action maps
+    let global_map = global_map();
+    let normal_map = normal_map();
+    let command_map = command_map();
+    let insert_map = insert_map();
+
+    // Var for stdout
     let mut stdout = io::stdout();
 
     // Init terminal
+    stdout.execute(terminal::EnterAlternateScreen)?;
     terminal::enable_raw_mode()?;
-    execute!(stdout, terminal::EnterAlternateScreen)?;
 
-    // Properties
-
-    // Initial state
+    // Init state
     let (width, height) = terminal::size()?;
     let mut state = State {
+        running: true,
         width,
         height,
         mode: Mode::Normal,
-        command: String::new(),
-        cursor_position: Cursor {
-            normal: position()?,
+        cursor_pos: Cursor {
+            normal: (0, 0),
             command: (1, height - 1),
-            insert: position()?,
+            insert: (0, 0),
         },
-        buffer: String::new(),
+        status_bar: vec![String::from("NORMAL")],
+        command: String::new(),
+        buffer: vec![String::new()],
     };
 
     // Initial draw
     draw(&mut stdout, &mut state)?;
 
     // Event loop
-    loop {
+    while state.running {
         let event = read()?;
 
         match event {
@@ -122,82 +312,39 @@ fn main() -> io::Result<()> {
                 draw(&mut stdout, &mut state)?;
             }
             Event::Key(event) => {
-                let code = event.code;
-                if code == KeyCode::Char('z') && event.modifiers.contains(KeyModifiers::CONTROL) {
-                    break;
+                if let Some(action) = global_map.get(&event) {
+                    action(&mut stdout, &mut state)?;
+                    continue;
                 }
 
-                match state.mode {
-                    Mode::Normal => match code {
-                        KeyCode::Char(':') => {
-                            state.mode = Mode::Command;
-                            state.command = String::from(":");
-                            draw(&mut stdout, &mut state)?;
-                        }
-                        KeyCode::Char('i') => {
-                            state.mode = Mode::Insert;
-                            state.cursor_position.insert.0 = state.cursor_position.insert.0.saturating_sub(1);
-                            draw(&mut stdout, &mut state)?;
-                        }
-                        KeyCode::Char('a') => {
-                            state.mode = Mode::Insert;
-                            draw(&mut stdout, &mut state)?;
-                        }
-                        _ => {}
-                    },
-                    // TODO: Command seems to draw in every branch, draw at the end instead
-                    Mode::Command => match code {
-                        KeyCode::Esc => {
-                            to_normal_mode(&mut stdout, &mut state)?;
-                        }
-                        KeyCode::Char('c') if event.modifiers.contains(KeyModifiers::CONTROL) => {
-                            to_normal_mode(&mut stdout, &mut state)?;
-                        }
-                        KeyCode::Backspace => {
-                            state.command.pop();
-                            state.cursor_position.command.0 = state.cursor_position.command.0.saturating_sub(1);
+                let map = match &state.mode {
+                    Mode::Normal => &normal_map,
+                    Mode::Command => &command_map,
+                    Mode::Insert => &insert_map,
+                };
 
-                            if state.command.is_empty() {
-                                state.mode = Mode::Normal;
-                                state.cursor_position.command.0 = 1;
-                            }
-                            draw(&mut stdout, &mut state)?;
-                        }
-                        KeyCode::Enter => match state.command.as_str() {
-                            ":q" => break,
-                            _ => {
-                                state.command = String::from("Unknown command.");
-                                state.mode = Mode::Normal;
-                                state.cursor_position.command.0 = 1;
-                                draw(&mut stdout, &mut state)?;
-                            }
-                        }
-                        KeyCode::Char(x) => {
-                            state.command.push(x);
-                            state.cursor_position.command.0 += 1;
-                            draw(&mut stdout, &mut state)?;
-                        }
-                        _ => {}
-                    },
-                    Mode::Insert => match code {
-                        KeyCode::Esc => {
-                            state.cursor_position.normal.0 = state.cursor_position.normal.0.saturating_sub(1);
-                            to_normal_mode(&mut stdout, &mut state)?;
-                        }
-                        KeyCode::Enter => {
-                            state.buffer.push_str("\n");
-                            state.cursor_position.insert = (0, state.cursor_position.insert.1 + 1);
-                            state.cursor_position.normal = (0, state.cursor_position.normal.1 + 1);
-                            draw(&mut stdout, &mut state)?;
-                        }
-                        KeyCode::Char(x) => {
-                            state.buffer.push(x);
-                            state.cursor_position.insert.0 += 1;
-                            state.cursor_position.normal.0 += 1;
-                            draw(&mut stdout, &mut state)?;
-                        }
-                        _ => {}
-                    }
+                if let Some(action) = map.get(&event) {
+                    action(&mut stdout, &mut state)?;
+                    continue;
+                }
+
+                // Handle text insert for different modes
+                if let (Mode::Command, KeyCode::Char(x)) = (&state.mode, event.code) {
+                    state.command.push(x);
+                    state.cursor_pos.command.0 += 1;
+                    draw(&mut stdout, &mut state)?;
+                    continue;
+                }
+
+                if let (Mode::Insert, KeyCode::Char(x)) = (&state.mode, event.code) {
+                    let (col, row) = state.cursor_pos.insert;
+                    let line = &mut state.buffer[row as usize];
+                    let insert_index = (col as usize).min(line.len());
+                    line.insert(insert_index, x);
+
+                    state.cursor_pos.insert.0 += 1;
+                    state.cursor_pos.normal.0 += 1;
+                    draw(&mut stdout, &mut state)?;
                 }
             }
             _ => {}
@@ -206,7 +353,7 @@ fn main() -> io::Result<()> {
 
     // Clean up terminal
     terminal::disable_raw_mode()?;
-    execute!(stdout, terminal::LeaveAlternateScreen)?;
+    stdout.execute(terminal::LeaveAlternateScreen)?;
 
     Ok(())
 }
