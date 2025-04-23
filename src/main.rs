@@ -67,6 +67,7 @@ fn normal_map() -> HashMap<KeyEvent, Action> {
         KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
         into_action(|stdout, state| {
             state.mode = Mode::Command;
+            state.status_bar[0] = String::from("COMMAND");
             state.command = String::from(":");
             draw(stdout, state)
         }),
@@ -76,6 +77,7 @@ fn normal_map() -> HashMap<KeyEvent, Action> {
         KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
         into_action(|stdout, state| {
             state.mode = Mode::Insert;
+            state.status_bar[0] = String::from("INSERT");
             state.cursor_pos.insert.0 = state.cursor_pos.insert.0.saturating_sub(1);
             draw(stdout, state)
         }),
@@ -85,9 +87,61 @@ fn normal_map() -> HashMap<KeyEvent, Action> {
         KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
         into_action(|stdout, state| {
             state.mode = Mode::Insert;
-            if state.cursor_pos.insert.0 == 0 {
+            state.status_bar[0] = String::from("INSERT");
+
+            let line = &state.buffer[state.cursor_pos.normal.1 as usize];
+            let length = line.len() as u16;
+            if state.cursor_pos.normal.0 != length - 1 {
                 state.cursor_pos.insert.0 += 1;
             }
+            draw(stdout, state)
+        }),
+    );
+
+    // Navigation
+    m.insert(
+        KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        into_action(|stdout, state| {
+            state.cursor_pos.normal.0 = state.cursor_pos.normal.0.saturating_sub(1);
+            state.cursor_pos.insert.0 = state.cursor_pos.insert.0.saturating_sub(1);
+            draw(stdout, state)
+        }),
+    );
+
+    m.insert(
+        KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+        into_action(|stdout, state| {
+            let line = &state.buffer[state.cursor_pos.normal.1 as usize];
+            let length = line.len() as u16;
+            if state.cursor_pos.normal.0 < length - 1 {
+                state.cursor_pos.normal.0 += 1;
+                state.cursor_pos.insert.0 += 1;
+            }
+            draw(stdout, state)
+        }),
+    );
+
+    // TODO: Implement 'j' and 'k' properly
+    m.insert(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        into_action(|stdout, state| {
+            let rows = (state.buffer.len() - 1) as u16;
+
+            if state.cursor_pos.normal.1 < rows {
+                state.cursor_pos.normal.1 += 1;
+            }
+
+            draw(stdout, state)
+        }),
+    );
+
+    m.insert(
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+        into_action(|stdout, state| {
+            if state.cursor_pos.normal.1 > 0 {
+                state.cursor_pos.normal.1 -= 1;
+            }
+
             draw(stdout, state)
         }),
     );
@@ -97,6 +151,7 @@ fn normal_map() -> HashMap<KeyEvent, Action> {
 
 fn command_to_normal(stdout: &mut io::Stdout, state: &mut State) -> io::Result<()> {
     state.mode = Mode::Normal;
+    state.status_bar[0] = String::from("NORMAL");
     state.command.clear();
     state.cursor_pos.command.0 = 1;
     draw(stdout, state)
@@ -113,6 +168,7 @@ fn command_map() -> HashMap<KeyEvent, Action> {
 
             if state.command.is_empty() {
                 state.mode = Mode::Normal;
+                state.status_bar[0] = String::from("NORMAL");
                 state.cursor_pos.command.0 = 1;
             }
 
@@ -138,6 +194,7 @@ fn command_map() -> HashMap<KeyEvent, Action> {
                 _ => {
                     state.command = String::from("Unknown command.");
                     state.mode = Mode::Normal;
+                    state.status_bar[0] = String::from("NORMAL");
                     state.cursor_pos.command.0 = 1;
                 }
             }
