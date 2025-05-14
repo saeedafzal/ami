@@ -89,11 +89,13 @@ fn normal_map() -> HashMap<KeyEvent, Action> {
             state.mode = Mode::Insert;
             state.status_bar[0] = String::from("INSERT");
 
+            let mut offset = 1;
             let line = &state.buffer[state.cursor_pos.normal.1 as usize];
-            let length = line.len() as u16;
-            if state.cursor_pos.normal.0 != length - 1 {
-                state.cursor_pos.insert.0 += 1;
+            if line.is_empty() {
+                offset = 0;
             }
+
+            state.cursor_pos.insert.0 = state.cursor_pos.normal.0 + offset;
             draw(stdout, state)
         }),
     );
@@ -111,26 +113,25 @@ fn normal_map() -> HashMap<KeyEvent, Action> {
     m.insert(
         KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
         into_action(|stdout, state| {
+            let mut offset = 1;
             let line = &state.buffer[state.cursor_pos.normal.1 as usize];
-            let length = line.len() as u16;
-            if state.cursor_pos.normal.0 < length - 1 {
-                state.cursor_pos.normal.0 += 1;
-                state.cursor_pos.insert.0 += 1;
+            if line.is_empty() || line.len() == state.cursor_pos.normal.0 as usize + 1 {
+                offset = 0;
             }
+
+            state.cursor_pos.normal.0 += offset;
+            state.cursor_pos.insert.0 += offset;
             draw(stdout, state)
         }),
     );
 
-    // TODO: Implement 'j' and 'k' properly
     m.insert(
         KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
         into_action(|stdout, state| {
             let rows = (state.buffer.len() - 1) as u16;
-
             if state.cursor_pos.normal.1 < rows {
                 state.cursor_pos.normal.1 += 1;
             }
-
             draw(stdout, state)
         }),
     );
@@ -141,7 +142,6 @@ fn normal_map() -> HashMap<KeyEvent, Action> {
             if state.cursor_pos.normal.1 > 0 {
                 state.cursor_pos.normal.1 -= 1;
             }
-
             draw(stdout, state)
         }),
     );
