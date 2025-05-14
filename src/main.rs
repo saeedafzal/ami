@@ -73,12 +73,29 @@ fn normal_map() -> HashMap<KeyEvent, Action> {
         }),
     );
 
+    // Go to insert mode
     m.insert(
         KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
         into_action(|stdout, state| {
             state.mode = Mode::Insert;
             state.status_bar[0] = String::from("INSERT");
             state.cursor_pos.insert.0 = state.cursor_pos.insert.0.saturating_sub(1);
+            draw(stdout, state)
+        }),
+    );
+
+    m.insert(
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+        into_action(|stdout, state| {
+            state.mode = Mode::Insert;
+            state.status_bar[0] = String::from("INSERT");
+
+            let y = state.cursor_pos.normal.1;
+            let index = y + 1;
+            state.buffer.insert(index as usize, String::new());
+
+            state.cursor_pos.normal = (0, index);
+            state.cursor_pos.insert = (0, index);
             draw(stdout, state)
         }),
     );
@@ -113,14 +130,13 @@ fn normal_map() -> HashMap<KeyEvent, Action> {
     m.insert(
         KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
         into_action(|stdout, state| {
-            let mut offset = 1;
             let line = &state.buffer[state.cursor_pos.normal.1 as usize];
             if line.is_empty() || line.len() == state.cursor_pos.normal.0 as usize + 1 {
-                offset = 0;
+                return Ok(());
             }
 
-            state.cursor_pos.normal.0 += offset;
-            state.cursor_pos.insert.0 += offset;
+            state.cursor_pos.normal.0 += 1;
+            state.cursor_pos.insert.0 += 1;
             draw(stdout, state)
         }),
     );
@@ -128,10 +144,21 @@ fn normal_map() -> HashMap<KeyEvent, Action> {
     m.insert(
         KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
         into_action(|stdout, state| {
-            let rows = (state.buffer.len() - 1) as u16;
-            if state.cursor_pos.normal.1 < rows {
-                state.cursor_pos.normal.1 += 1;
+            let buffer = &state.buffer;
+
+            if buffer.len() == 1 || state.cursor_pos.normal.1 + 1 == buffer.len() as u16 {
+                return Ok(());
             }
+
+            let line = &buffer[state.cursor_pos.normal.1 as usize + 1];
+            if line.len() - 1 < state.cursor_pos.normal.0.into() {
+                let l16 = line.len() as u16 - 1;
+                state.cursor_pos.normal.0 = l16;
+                state.cursor_pos.insert.0 = l16;
+            }
+
+            state.cursor_pos.normal.1 += 1;
+            state.cursor_pos.insert.1 += 1;
             draw(stdout, state)
         }),
     );
@@ -139,9 +166,8 @@ fn normal_map() -> HashMap<KeyEvent, Action> {
     m.insert(
         KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
         into_action(|stdout, state| {
-            if state.cursor_pos.normal.1 > 0 {
-                state.cursor_pos.normal.1 -= 1;
-            }
+            state.cursor_pos.normal.1 = state.cursor_pos.normal.1.saturating_sub(1);
+            state.cursor_pos.insert.1 = state.cursor_pos.insert.1.saturating_sub(1);
             draw(stdout, state)
         }),
     );
